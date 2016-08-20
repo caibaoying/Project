@@ -3,8 +3,8 @@
 PPSection* PerformanceAnalyzer::CreateSection(const char* filename, const char* function, \
 	int line, const char* desc)
 {
+	unique_lock<mutex> Lock(_mutex);
 	PPNode ppnode(filename, function, line, desc);
-
 	PPSection* ppsection = NULL;
 
 	map<PPNode, PPSection*>::iterator it = _ppMap.find(ppnode);

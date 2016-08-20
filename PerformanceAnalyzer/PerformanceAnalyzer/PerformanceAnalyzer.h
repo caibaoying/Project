@@ -6,6 +6,9 @@ using namespace std;
 #include<map>
 #include <stdarg.h>
 #include <assert.h>
+#include <windows.h>
+// C++11
+#include <mutex>
 
 typedef long long LongType;
 ///////////////////////////////////////////////////////////////////
@@ -62,6 +65,48 @@ protected:
 	FILE* _fout;
 };
 
+// 获取当前线程id
+static int GetThreadId()
+{
+#ifdef _WIN32
+	return GetCurrentThreadId();
+#else
+	return thread_self();
+#endif
+}
+
+enum option
+{
+	PPCO_NONE = 0,                  // 不做剖析
+	PPCO_PROFILER = 2,              // 开启剖析
+	PPCO_SAVE_TO_CONSOLE = 4,       // 保存到控制台
+	PPCO_SAVE_TO_FILE = 8,          // 保存到文件
+	PPCO_SAVE_BY_CALL_COUNT = 16,   // 按调用次数降序保存
+	PPCO_SAVE_BY_COST_TIME = 32     // 按调用花费时间降序保存
+};
+
+//// 配置管理
+//class ConfigManager :public Singleton<ConfigManager>
+//{
+//public:
+//	void SetOptions(int options)
+//	{
+//		_options = options;
+//	}
+//
+//	int GetOptions()
+//	{
+//		return _options;
+//	}
+//
+//private:
+//	ConfigManager()
+//		:_options(PPCO_NONE)
+//	{}
+//
+//	int _options;
+//};
+
 ///////////////////////////////////
 //           性能剖析            //
 ///////////////////////////////////
@@ -69,8 +114,7 @@ struct PPNode
 {
 	string _filename; // 文件名
 	string _function; // 函数名
-	int _line;         // 行号
-
+	int _line;        // 行号
 	string _desc;     // 描述
 
 	PPNode(const string& filename, const string& function, int line, const string& desc)
@@ -127,42 +171,65 @@ struct PPSection
 {
 public:
 	PPSection()
-		:_begintime(0)
-		, _costtime(0)
-		, _callcount(0)
-		, _refCount(0)
+		: _TotalCallCount(0)
+		, _TotalCostTime(0)
+		, _TotalRefCount(0)
 	{}
 
-	void Begin()
+	void Begin(int threadId)
 	{
-		if (_refCount == 0)
+		// 加锁
+		unique_lock<mutex> Lock(_mutex);
+
+		if (++_refCountMap[threadId] == 1)
 		{
-			_begintime = clock();
+			_beginTimeMap[threadId] = clock();
 		}
 
-		++_refCount;
-		++_callcount;
+		_callCountMap[threadId]++;
+		++_TotalCostTime;
+		++_TotalCallCount;
+		++_TotalRefCount;
 	}
 
-	void End()
+	void End(int threadId)
 	{
-		--_refCount;
-		if (_refCount == 0)
+		unique_lock<mutex> Lock(_mutex);
+
+		LongType refCount = --_refCountMap[threadId];
+
+		// 引用计数 == 0时更新剖析段花费时间
+		// 解决剖析递归程序的问题和剖析段不匹配的问题
+		if (refCount == 0)
 		{
-			_costtime += clock() - _begintime;
+			map<int, LongType>::iterator it = _beginTimeMap.find(threadId);
+			if (it != _beginTimeMap.end())
+			{
+				LongType costTime = clock() - it->second;
+
+				if (refCount == 0)
+					_costTimeMap[threadId] += costTime;
+				else
+					_costTimeMap[threadId] = costTime;
+
+				_TotalCostTime += costTime;
+			}
 		}
+
+		--_TotalRefCount;
 	}
 
 	//加锁
-	map<int, LongType> _beginTimeMap;
-	map<int, LongType> _costTimeMap;
-	map<int, LongType> _callCountMap;
-	map<int, LongType> _refCountMap;
+	mutex _mutex;					     // 互斥锁
 
-	int _begintime;
-	int _costtime;
-	int _callcount;
-	int _refCount;          //引用计数
+	map<int, LongType> _beginTimeMap;    // 开始时间统计
+	map<int, LongType> _costTimeMap;     // 花费时间统计
+	map<int, LongType> _callCountMap;    // 调用次数统计
+	map<int, LongType> _refCountMap;     // 引用计数
+
+	int _TotalCostTime;          //总花费时间
+	int _TotalCallCount;         //总调用次数
+	int _TotalRefCount;          //总引用计数
 };
 
 template <class T>
@@ -171,16 +238,30 @@ class Singleton
 public:
 	static T* GetInstance()
 	{
-		assert(_sInstance);
+		// 双重检查保障线程安全和效率
+		if (_sInstance == NULL)
+		{
+			unique_lock<mutex> lock(_mutex);
+			if (_sInstance == NULL)
+			{
+				_sInstance = new T();
+			}
+		}
 		return _sInstance;
 	}
 
 protected:
-	static T* _sInstance;
+	Singleton()
+	{}
+	static T* _sInstance;     // 单实例对象
+	static mutex _mutex;      // 互斥锁对象
 };
 
 template <class T>
-T* Singleton<T>::_sInstance = new T;
+T* Singleton<T>::_sInstance = NULL;
+
+template <class T>
+mutex Singleton<T>::_mutex;
 
 class PerformanceAnalyzer:public Singleton<PerformanceAnalyzer>
 {
@@ -201,24 +282,37 @@ protected:
 	void _Output(SaveAdapter& sa)
 	{
 		int num = 1;
-		map<PPNode, PPSection*>::iterator it = _ppMap.begin();
-		while (it != _ppMap.end())
+		map<PPNode, PPSection*>::iterator ppIt = _ppMap.begin();
+		while (ppIt != _ppMap.end())
 		{
-			sa.Save("NO%d, Desc:%s\n", num++, it->first._desc.c_str());
+			sa.Save("NO%d, Desc:%s\n", num++, ppIt->first._desc.c_str());
 			sa.Save("Filename:%s, Function:%s, Line:%d\n", 
-				it->first._filename.c_str(),
-				it->first._function.c_str(),
-				it->first._line);
+				ppIt->first._filename.c_str(),
+				ppIt->first._function.c_str(),
+				ppIt->first._line);
 
-			sa.Save("CostTime:%.2f, CallCount:%d\n", (double)it->second->_costtime/1000, 
-				it->second->_callcount);
-			
-			++it;
+			const PPNode& Node = ppIt->first;
+			PPSection* Section = ppIt->second;
+			map<int, LongType>::iterator efIt = Section->_costTimeMap.begin();
+			while (efIt != Section->_costTimeMap.end())
+			{
+				int id = efIt->first;
+				sa.Save("ThreadId:%d, CostTime:%.2f, CallCount:%d\n"
+					, id
+					,(double)efIt->second / 1000
+					,Section->_callCountMap[id]);
+
+				++efIt;
+			}
+			sa.Save("TotalCostTime:%.2f, TotalCallCount:%d\n\n", (double)Section->_TotalCostTime/1000, Section->_TotalCallCount);
+
+			++ppIt;
 		}
 	}
 
 protected:
 	map<PPNode, PPSection*> _ppMap;
+	mutex _mutex;
 };
 
 struct Release
@@ -231,7 +325,7 @@ struct Release
 
 #define PERFORMANCE_PROFILER_EE_BEGIN(sign, desc) \
 	PPSection* sign##section = PerformanceAnalyzer::GetInstance()->CreateSection(__FILE__, __FUNCTION__, __LINE__, desc); \
-	sign##section->Begin();
+	sign##section->Begin(GetThreadId());
 
 #define PERFORMANCE_PROFILER_EE_END(sign) \
-	sign##section->End();
+	sign##section->End(GetThreadId());
