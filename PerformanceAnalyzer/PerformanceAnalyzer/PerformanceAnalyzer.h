@@ -7,17 +7,24 @@ using namespace std;
 #include <stdarg.h>
 #include <assert.h>
 #include <windows.h>
+#include <vector>
+#include <algorithm>
 // C++11
 #include <mutex>
 
 typedef long long LongType;
 ///////////////////////////////////////////////////////////////////
 // 保存适配器
+////////////////////////////////////////////////////////////////
 class SaveAdapter
 {
 public:
 	virtual void Save(const char* format, ...) = 0;
 };
+
+//////////////////////////////////////////////////
+//    控制台保存适配器
+///////////////////////////////////////////////////
 
 class ConsoleSaveAdapter :public SaveAdapter
 {
@@ -30,6 +37,10 @@ public:
 		va_end(args);
 	}
 };
+
+//////////////////////////////////////////////////
+//        文件保存适配器
+///////////////////////////////////////////////////
 
 class FileSaveAdapter :public SaveAdapter
 {
@@ -75,41 +86,12 @@ static int GetThreadId()
 #endif
 }
 
-enum option
-{
-	PPCO_NONE = 0,                  // 不做剖析
-	PPCO_PROFILER = 2,              // 开启剖析
-	PPCO_SAVE_TO_CONSOLE = 4,       // 保存到控制台
-	PPCO_SAVE_TO_FILE = 8,          // 保存到文件
-	PPCO_SAVE_BY_CALL_COUNT = 16,   // 按调用次数降序保存
-	PPCO_SAVE_BY_COST_TIME = 32     // 按调用花费时间降序保存
-};
-
-//// 配置管理
-//class ConfigManager :public Singleton<ConfigManager>
-//{
-//public:
-//	void SetOptions(int options)
-//	{
-//		_options = options;
-//	}
-//
-//	int GetOptions()
-//	{
-//		return _options;
-//	}
-//
-//private:
-//	ConfigManager()
-//		:_options(PPCO_NONE)
-//	{}
-//
-//	int _options;
-//};
-
 ///////////////////////////////////
 //           性能剖析            //
 ///////////////////////////////////
+
+///////////////////////////////////////////////////
+//    文件信息， key
 struct PPNode
 {
 	string _filename; // 文件名
@@ -166,6 +148,9 @@ struct PPNode
 			(_line == ppnode._line));
 	}
 };
+
+///////////////////////////////////////////////////
+//效率信息： value
 
 struct PPSection
 {
@@ -232,6 +217,9 @@ public:
 	int _TotalRefCount;          //总引用计数
 };
 
+///////////////////////
+//单例模式
+
 template <class T>
 class Singleton
 {
@@ -263,6 +251,73 @@ T* Singleton<T>::_sInstance = NULL;
 template <class T>
 mutex Singleton<T>::_mutex;
 
+//////////////////////////////////////////////////
+//    配置管理选项
+enum option
+{
+	PPCO_NONE = 0,                  // 不做剖析
+	PPCO_PROFILER = 1,              // 开启剖析
+	PPCO_SAVE_TO_CONSOLE = 2,       // 保存到控制台
+	PPCO_SAVE_TO_FILE = 4,          // 保存到文件
+	PPCO_SAVE_BY_CALL_COUNT = 8,   // 按调用次数降序保存
+	PPCO_SAVE_BY_COST_TIME = 16,     // 按调用花费时间降序保存
+};
+
+//////////////////////////////////////////////////
+// 配置管理
+///////////////////////////////////////////////////
+
+class ConfigManager :public Singleton<ConfigManager>
+{
+	friend class Singleton<ConfigManager>;
+public:
+	void SetOptions(int options)
+	{
+		_options |= options;
+	}
+
+	int GetOptions()
+	{
+		return _options;
+	}
+
+private:
+	ConfigManager()
+		:_options(PPCO_NONE)
+	{}
+
+	int _options;
+};
+
+/////////////////////////////////////////////////
+// 资源统计
+
+// 资源统计信息
+//struct ResourceInfo
+//{
+//	LongType _peak;  // 最大峰值
+//	LongType _avg;   // 平均
+//
+//	LongType _total; // 总值
+//	LongType _count; // 次数
+//
+//	ResourceInfo()
+//		:_peak(0)
+//		, _avg(0)
+//		, _total(0)
+//		, _count(0)
+//	{}
+//
+//	void Update(LongType value);
+//	void Serialize(SaveAdapter& sa)const;
+//};
+//
+//// 资源统计
+//class ResourceStatistics
+//{
+//public:
+//};
+
 class PerformanceAnalyzer:public Singleton<PerformanceAnalyzer>
 {
 	friend class Singleton<PerformanceAnalyzer>;
@@ -271,50 +326,30 @@ public:
 
 	void Output()
 	{
-		ConsoleSaveAdapter csa;
-		_Output(csa);
-
-		FileSaveAdapter fsa("PerformanceProfilerReport.txt");
-		_Output(fsa);
+		int flag = ConfigManager::GetInstance()->GetOptions();
+		if (flag & PPCO_SAVE_TO_CONSOLE)
+		{
+			ConsoleSaveAdapter csa;
+			_Output(csa);
+		}
+		if (flag & PPCO_SAVE_TO_FILE)
+		{
+			FileSaveAdapter fsa("PerformanceProfilerReport.txt");
+			_Output(fsa);
+		}
 	}
 
 protected:
-	void _Output(SaveAdapter& sa)
-	{
-		int num = 1;
-		map<PPNode, PPSection*>::iterator ppIt = _ppMap.begin();
-		while (ppIt != _ppMap.end())
-		{
-			sa.Save("NO%d, Desc:%s\n", num++, ppIt->first._desc.c_str());
-			sa.Save("Filename:%s, Function:%s, Line:%d\n", 
-				ppIt->first._filename.c_str(),
-				ppIt->first._function.c_str(),
-				ppIt->first._line);
-
-			const PPNode& Node = ppIt->first;
-			PPSection* Section = ppIt->second;
-			map<int, LongType>::iterator efIt = Section->_costTimeMap.begin();
-			while (efIt != Section->_costTimeMap.end())
-			{
-				int id = efIt->first;
-				sa.Save("ThreadId:%d, CostTime:%.2f, CallCount:%d\n"
-					, id
-					,(double)efIt->second / 1000
-					,Section->_callCountMap[id]);
-
-				++efIt;
-			}
-			sa.Save("TotalCostTime:%.2f, TotalCallCount:%d\n\n", (double)Section->_TotalCostTime/1000, Section->_TotalCallCount);
-
-			++ppIt;
-		}
-	}
+	static bool CompareByCallCount(map<PPNode, PPSection*>::iterator l, map<PPNode, PPSection*>::iterator r);
+	static bool CompareByCostTime(map<PPNode, PPSection*>::iterator l, map<PPNode, PPSection*>::iterator r);
+	void _Output(SaveAdapter& sa);
 
 protected:
 	map<PPNode, PPSection*> _ppMap;
 	mutex _mutex;
 };
 
+// 打印
 struct Release
 {
 	~Release()
@@ -323,9 +358,23 @@ struct Release
 	}
 };
 
-#define PERFORMANCE_PROFILER_EE_BEGIN(sign, desc) \
-	PPSection* sign##section = PerformanceAnalyzer::GetInstance()->CreateSection(__FILE__, __FUNCTION__, __LINE__, desc); \
-	sign##section->Begin(GetThreadId());
+///////////////////////////各种宏//////////////////////////
 
+// 开始时间
+#define PERFORMANCE_PROFILER_EE_BEGIN(sign, desc) \
+	PPSection* sign##section = NULL;                         \
+if (ConfigManager::GetInstance()->GetOptions() & PPCO_PROFILER)\
+{                                                        \
+	sign##section = PerformanceAnalyzer::GetInstance()->CreateSection(__FILE__, __FUNCTION__, __LINE__, desc); \
+	sign##section->Begin(GetThreadId());                     \
+}
+
+
+// 结束时间
 #define PERFORMANCE_PROFILER_EE_END(sign) \
+if (sign##section)                    \
 	sign##section->End(GetThreadId());
+
+// 选项配置
+#define SET_OPTION(option)\
+	ConfigManager::GetInstance()->SetOptions(option);

@@ -7,11 +7,11 @@ void Run(int n)
 	while (n--)
 	{
 		PERFORMANCE_PROFILER_EE_BEGIN(network, "网络传输");
-		Sleep(500);
+		Sleep(1500);
 		PERFORMANCE_PROFILER_EE_END(network);
 
 		PERFORMANCE_PROFILER_EE_BEGIN(mid, "中间逻辑");
-		Sleep(500);
+		Sleep(200);
 		PERFORMANCE_PROFILER_EE_END(mid);
 
 		PERFORMANCE_PROFILER_EE_BEGIN(sql, "数据库");		
@@ -23,6 +23,11 @@ void Run(int n)
 void TestMutilThread()
 {
 	Release tmp;
+	int options = PPCO_SAVE_BY_CALL_COUNT | PPCO_SAVE_TO_CONSOLE | PPCO_PROFILER;
+	SET_OPTION(options);
+
+	/*int options = PPCO_SAVE_BY_CALL_COUNT | PPCO_SAVE_TO_CONSOLE | PPCO_PROFILER;
+	ConfigManager::GetInstance()->SetOptions(options);*/
 	thread t1(Run, 1);
 	thread t2(Run, 2);
 	thread t3(Run, 3);
